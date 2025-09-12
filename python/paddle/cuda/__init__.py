@@ -18,8 +18,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Union
 
-import paddle
-from paddle import CUDAPlace, CustomPlace
+from paddle import base, core, device as paddle_device
 from paddle.device import (
     PaddleStream as Stream,
     _device_to_paddle as _device_to_paddle,
@@ -27,9 +26,9 @@ from paddle.device import (
 )
 
 if TYPE_CHECKING:
-    from paddle.base import core
+    from paddle import CUDAPlace, CustomPlace
 
-DeviceLike = Union[CUDAPlace, CustomPlace, int, str, None]
+    DeviceLike = Union["CUDAPlace", "CustomPlace", int, str, None]
 
 
 def is_available() -> bool:
@@ -52,7 +51,7 @@ def is_available() -> bool:
             ... else:
             ...     print("CUDA is not available")
     """
-    return paddle.device.cuda.device_count() >= 1
+    return paddle_device.cuda.device_count() >= 1
 
 
 def synchronize(device: DeviceLike = None) -> None:
@@ -93,7 +92,7 @@ def synchronize(device: DeviceLike = None) -> None:
             >>> paddle.device.cuda.synchronize(place)
     """
     dev = _device_to_paddle(device)
-    paddle.device.synchronize(dev)
+    paddle_device.synchronize(dev)
 
 
 def current_stream(device: DeviceLike = None) -> core.CUDAStream:
@@ -126,7 +125,7 @@ def current_stream(device: DeviceLike = None) -> core.CUDAStream:
             >>> print(s2)
     """
     dev = _device_to_paddle(device)
-    return paddle.device.current_stream(dev)
+    return paddle_device.current_stream(dev)
 
 
 def get_device_properties(device: DeviceLike = None):
@@ -160,7 +159,7 @@ def get_device_properties(device: DeviceLike = None):
             >>> print(props0.name, props0.total_memory)
     """
     dev = _device_to_paddle(device)
-    return paddle.device.cuda.get_device_properties(dev)
+    return paddle_device.cuda.get_device_properties(dev)
 
 
 def get_device_name(device: DeviceLike = None) -> str:
@@ -193,7 +192,7 @@ def get_device_name(device: DeviceLike = None) -> str:
             >>> print(name0)
     """
     dev = _device_to_paddle(device)
-    return paddle.device.cuda.get_device_name(device)
+    return paddle_device.cuda.get_device_name(dev)
 
 
 def get_device_capability(device: DeviceLike = None) -> tuple[int, int]:
@@ -226,7 +225,11 @@ def get_device_capability(device: DeviceLike = None) -> tuple[int, int]:
             >>> print(capability0)
     """
     dev = _device_to_paddle(device)
-    return paddle.device.cuda.get_device_capability(device)
+    return paddle_device.cuda.get_device_capability(dev)
+
+
+def is_initialized() -> bool:
+    return paddle_device.is_compiled_with_cuda()
 
 
 class StreamContext(_PaddleStreamGuard):
@@ -258,11 +261,11 @@ class StreamContext(_PaddleStreamGuard):
 
     """
 
-    def __init__(self, stream: paddle.device.Stream):
+    def __init__(self, stream: paddle_device.Stream):
         super().__init__(stream)
 
 
-def stream(stream_obj: paddle.device.Stream | None) -> StreamContext:
+def stream(stream_obj: paddle_device.Stream | None) -> StreamContext:
     '''
 
     Notes:
@@ -294,6 +297,125 @@ def stream(stream_obj: paddle.device.Stream | None) -> StreamContext:
 
     '''
     return StreamContext(stream_obj)
+
+
+def cudart():
+    r"""Retrieves the CUDA runtime API module.
+
+    This function initializes the CUDA runtime environment if it is not already
+    initialized and returns the CUDA runtime API module (_cudart). The CUDA
+    runtime API module provides access to various CUDA runtime functions.
+
+    Args:
+        ``None``
+
+    Returns:
+        module: The CUDA runtime API module (_cudart).
+
+    Examples:
+        .. code-block:: python
+
+            >>> # doctest: +REQUIRES(env:GPU)
+            >>> import paddle
+            >>> from paddle.cuda import cudart, check_error
+            >>> import os
+            >>>
+            >>> os.environ['CUDA_PROFILE'] = '1'
+            >>>
+            >>> def perform_cuda_operations_with_streams():
+            >>>     stream = paddle.cuda.Stream()
+            >>>     with paddle.cuda.stream(stream):
+            >>>         x = paddle.randn(100, 100, device='cuda')
+            >>>         y = paddle.randn(100, 100, device='cuda')
+            >>>         z = paddle.mul(x, y)
+            >>>     return z
+            >>>
+            >>> paddle.cuda.synchronize()
+            >>> # print("====== Start nsys profiling ======")
+            >>> check_error(cudart().cudaProfilerStart())
+            >>> paddle.core.nvprof_start()
+            >>> paddle.core.nvprof_nvtx_push("Test")
+            >>> result = perform_cuda_operations_with_streams()
+            >>> paddle.core.nvprof_nvtx_pop()
+            >>> # print("CUDA operations completed.")
+            >>> check_error(paddle.cuda.cudart().cudaProfilerStop())
+            >>> # print("====== End nsys profiling ======")
+    """
+    return base.libpaddle._cudart
+
+
+class CudaError(RuntimeError):
+    def __init__(self, code: int) -> None:
+        msg = base.libpaddle._cudart.cudaGetErrorString(
+            base.libpaddle._cudart.cudaError(code)
+        )
+        super().__init__(f"{msg} ({code})")
+
+
+def check_error(res: int) -> None:
+    r"""Check the return code of a CUDA runtime API call.
+
+    This function validates whether the given result code from a CUDA
+    runtime call indicates success. If the result code is not
+    :data:`base.libpaddle._cudart.cudaError.success`, it raises a
+    :class:`CudaError`.
+
+    Args:
+        res (int): The CUDA runtime return code.
+
+    Examples:
+        .. code-block:: python
+
+            >>> # doctest: +REQUIRES(env:GPU)
+            >>> from paddle.cuda import check_error
+            >>> check_error(0) # check for cuda success code # will not raise Error
+            >>> # check_error(1) # check for cuda error code 1(invalid argument), will raise Error
+            >>> # check_error(2) # check for cuda error code 2(out of memory), will raise Error
+    """
+    if res != base.libpaddle._cudart.cudaError.success:
+        raise CudaError(res)
+
+
+def mem_get_info(device: DeviceLike = None) -> tuple[int, int]:
+    r"""Return the free and total GPU memory (in bytes) for a given device using ``cudaMemGetInfo``.
+
+    This function queries the CUDA runtime for the amount of memory currently
+    available and the total memory capacity of the specified device.
+
+    Args:
+        device (DeviceLike, optional): The target device. If ``None`` (default),
+            the current device, as returned by ``paddle.device.get_device``
+            will be used.
+
+    Returns:
+        tuple[int, int]: A tuple ``(free, total)``, where
+            - ``free`` (int): The number of free bytes of GPU memory available.
+            - ``total`` (int): The total number of bytes of GPU memory.
+
+    Examples:
+        .. code-block:: python
+
+            >>> # doctest: +REQUIRES(env:GPU)
+            >>> from paddle.cuda import mem_get_info
+            >>> free_bytes, total_bytes = mem_get_info()
+    """
+    if device is None:
+        device: str = paddle_device.get_device()
+
+    if isinstance(device, str):
+        device: core.Place = paddle_device._convert_to_place(device)
+
+    if not isinstance(device, core.CUDAPlace) or (
+        isinstance(device, core.Place) and not device.is_gpu_place()
+    ):
+        raise ValueError(f"Expected a cuda device, but got: {device}")
+
+    device_id = (
+        device.get_device_id()
+        if isinstance(device, core.CUDAPlace)
+        else device.gpu_device_id()
+    )
+    return cudart().cudaMemGetInfo(device_id)
 
 
 def get_stream_from_external(
@@ -342,13 +464,17 @@ def get_stream_from_external(
     """
 
     device = _device_to_paddle(device)
-    stream_ex = paddle.device.get_stream_from_external(data_ptr, device)
+    stream_ex = paddle_device.get_stream_from_external(data_ptr, device)
 
     return stream_ex
 
 
 __all__ = [
+    "cudart",
+    "check_error",
     "is_available",
+    "is_initialized",
+    "mem_get_info",
     "synchronize",
     "current_stream",
     "get_device_properties",
